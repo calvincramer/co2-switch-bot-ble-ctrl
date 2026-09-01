@@ -30,13 +30,13 @@ DEVICE_TYPE_METER_PRO_CO2 = 0x35
 CO2_MAX_PPM = 9999
 
 CSV_COLUMNS = [
-    "timestamp",
-    "address",
+    "ts",
+    "addr",
     "model",
-    "temperature_c",
-    "humidity_pct",
+    "temp_c",
+    "humidity_percent",
     "co2_ppm",
-    "battery_pct",
+    "battery_percent",
     "rssi_dbm",
 ]
 
@@ -65,24 +65,28 @@ class Reading:
 
     def as_row(self) -> dict[str, str | float | int | None]:
         return {
-            "timestamp": self.timestamp.isoformat(timespec="seconds"),
-            "address": self.address,
+            "ts": self.timestamp.isoformat(timespec="seconds"),
+            "addr": self.address,
             "model": self.model,
-            "temperature_c": self.temp_celsius,
-            "humidity_pct": self.humidity_percent,
+            "temp_c": self.temp_celsius,
+            "humidity_percent": self.humidity_percent,
             "co2_ppm": self.co2_ppm,
-            "battery_pct": self.battery_percent,
+            "battery_percent": self.battery_percent,
             "rssi_dbm": self.rssi_dbm,
         }
 
     def format_line(self) -> str:
-        co2 = f"{self.co2_ppm:5d} ppm" if self.co2_ppm is not None else "    -- ppm"
-        battery = f"{self.battery_percent:3d}%" if self.battery_percent is not None else " --%"
-        rssi = f"{self.rssi_dbm:4d} dBm" if self.rssi_dbm is not None else "  -- dBm"
-        return (
-            f"{self.timestamp.isoformat(timespec='seconds')}  {self.address}  "
-            f"{self.temp_celsius:5.1f} C  {self.humidity_percent:3d}%  {co2}  "
-            f"batt {battery}  {rssi}  {self.model}"
+        return "  ".join(
+            [
+                self.timestamp.isoformat(timespec="seconds"),
+                self.address,
+                f"{self.temp_celsius:5.1f} C",
+                f"{self.humidity_percent:3d}%",
+                f"{self.co2_ppm:5d} ppm" if self.co2_ppm is not None else "    -- ppm",
+                "batt " + (f"{self.battery_percent:3d}%" if self.battery_percent is not None else " --%"),
+                f"{self.rssi_dbm:4d} dBm" if self.rssi_dbm is not None else "  -- dBm",
+                self.model,
+            ]
         )
 
 
@@ -97,10 +101,7 @@ def parse_device_type(service_data: bytes | None) -> int | None:
 
 
 def parse_reading(device: BLEDevice, adv: AdvertisementData) -> Reading | None:
-    """
-    Decode one advertisement into a Reading, or None if it isn't a Meter Pro
-    advertisement carrying measurements.
-    """
+    """Decode an advertisement into a Reading or None if the advertisement is bad"""
     service_data = adv.service_data.get(UUID_SWITCHBOT_SERVICE_DATA)
     device_type = parse_device_type(service_data)
     if device_type is None:
@@ -171,46 +172,49 @@ class Monitor:
         self.as_json = as_json
         self.csv_writer = csv_writer
         self.csv_file = csv_file
-        self.first_reading: asyncio.Future[Reading] = asyncio.get_running_loop().create_future()
-        self._last: dict[str, Reading] = {}
+        self._last_emitted: dict[str, Reading] = {}
 
-    def _matches_filter(self, device: BLEDevice) -> bool:
+    def __matches_filter(self, device: BLEDevice) -> bool:
+        """Address match?"""
         return self.addresses is None or device.address.upper() in self.addresses
 
-    def _should_emit(self, reading: Reading) -> bool:
+    def __should_emit(self, reading: Reading) -> bool:
+        """Different reading from previous? Or enough time has elapsed since previously emitted?"""
         if self.emit_all:
             return True
-        previous = self._last.get(reading.address)
+        previous = self._last_emitted.get(reading.address)
         if previous is None or previous.values != reading.values:
             return True
         return (reading.timestamp - previous.timestamp).total_seconds() >= self.min_interval
 
-    def _emit(self, reading: Reading, adv: AdvertisementData) -> None:
+    def __emit(self, reading: Reading) -> None:
+        """Output sensor readings somewhere/s"""
+        # Screen
         if self.as_json:
             print(json.dumps(reading.as_row()), flush=True)
         else:
             print(reading.format_line(), flush=True)
+
+        # File
         if self.csv_writer is not None and self.csv_file is not None:
             self.csv_writer.writerow(reading.as_row())
             self.csv_file.flush()
         return None
 
     def callback(self, device: BLEDevice, adv: AdvertisementData) -> None:
-        if not self._matches_filter(device):
+        if not self.__matches_filter(device):
             return None
         reading = parse_reading(device, adv)
         if reading is None:
             return None
-        if not self.first_reading.done():
-            self.first_reading.set_result(reading)
-        if self._should_emit(reading):
-            self._emit(reading, adv)
-        self._last[reading.address] = reading
+        if self.__should_emit(reading):
+            self.__emit(reading)
+            self._last_emitted[reading.address] = reading
         return None
 
 
 def open_csv(path: Path) -> tuple[TextIO, csv.DictWriter]:
-    """Append to the log, writing a header only if the file is new or empty."""
+    """Create or open CSV log file in append mode"""
     needs_header = not path.exists() or path.stat().st_size == 0
     handle = path.open("a", newline="")
     writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
@@ -226,7 +230,7 @@ def parse_args() -> argparse.Namespace:
         "--address",
         action="append",
         metavar="MAC",
-        help="only report this device (repeatable). Default: every meter in range",
+        help="only report for this device",
     )
     parser.add_argument(
         "--csv",
@@ -239,7 +243,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=300.0,
         metavar="SECONDS",
-        help="re-report unchanged readings this often (default: 300)",
+        help="re-report unchanged readings this often (default 300)",
     )
     parser.add_argument(
         "--emit-all",
@@ -247,16 +251,11 @@ def parse_args() -> argparse.Namespace:
         help="report every advertisement, without deduplicating",
     )
     parser.add_argument(
-        "--one",
-        action="store_true",
-        help="print the first reading, then exit",
-    )
-    parser.add_argument(
         "--timeout",
         type=float,
         default=0.0,
         metavar="SECONDS",
-        help="stop scanning after this long (default: run until interrupted)",
+        help="stop scanning after this long",
     )
     parser.add_argument("-j", "--json", action="store_true", help="print JSON lines")
     return parser.parse_args()
@@ -287,8 +286,6 @@ async def main() -> int:
     try:
         # Active scanning is required since the measurements are in the scan response
         async with BleakScanner(monitor.callback):
-            if args.one:
-                await monitor.first_reading
             if args.timeout > 0:
                 await asyncio.sleep(args.timeout)
             else:

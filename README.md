@@ -24,10 +24,5 @@ python3 -m pip install -r requirements.txt
 ./co2.py --csv co2.csv  # append readings to a CSV log
 ```
 
-## Logging Over Time Notes
-The device rebroadcasts the same numbers constantly, so by default a reading is only reported when a value changes or when `--min-interval` seconds (default 300) have passed since the last report. That keeps a CSV log readable without dropping real changes. `--all` disables it and reports every advertisement.
-
-```sh
-./co2.py -o ~/co2.csv          # one row per change, or every 5 minutes
-./co2.py -o ~/co2.csv -i 60    # ... or every minute
-```
+## Recording Useful Data
+The device advertises the same measurement multiple times before re-sensing the CO2, so by default a reading is only reported when the value changes or when `--min-interval` seconds have passed since the last report. This reduces useless data.
