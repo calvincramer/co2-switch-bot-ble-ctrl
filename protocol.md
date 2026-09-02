@@ -1,5 +1,5 @@
 # SwitchBot Meter Pro CO2 BLE protocol
-Everything this device measures is in its advertisements, no pairing needed.
+The current sensor information is sent in bluetooth advertisements. No pairing is needed.
 
 - model `W4900010`
 - device type byte `0x35`
