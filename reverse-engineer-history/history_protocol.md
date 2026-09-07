@@ -1,7 +1,7 @@
 # Reverse Engineering Sync
 This is to get the previous measurements that are stored on the device, not just listening for the current data from the bluetooth advertisements.
 
-## Steps
+## Get Bluetooth Packet Capture Steps
 Setup
 1. Get old android phone that I wiped, sign into google (twice yay for long randomized passwords)
     - OnePlus 6, Android 10
@@ -27,7 +27,6 @@ Get capture
 12. save capture to file
 
 ## Capture Analysis
-
 Pcap to useful format
 ```sh
 for f in *.pcapng; do
@@ -35,27 +34,33 @@ for f in *.pcapng; do
 done
 ```
 
-Command sequence:
+### Command sequence:
 ```
-  → 0x0011  (CCCD enable)
-  → 570f6805040000000000000000000000         ? unknown setup
-  ← 01
-  → 0x0011  (CCCD enable, again)
-x → 5700050308 00000000 6a9e1faf 00          set clock = 2026-09-06 21:21:35
-x ← 01
-  → 570f690801                               query capability
-  ← 01 510100040302                          ? unknown
-x → 570f69080201                             query history metadata
-x ← 01 6a9e1a4b 6a9e1f73 0000000c 0078       history metadata response
-x → 570f690803 01 00000000 04                read 4 records @ offset 0
-x ← 01 99307799300285028c993088993002770272
-x → 570f690803 01 00000004 04                read 4 records @ offset 4
-x ← 01 9931999931027a02799a32009a33028c0287
-x → 570f690803 01 00000008 04                read 4 records @ offset 8
-x ← 01 9a34119a34029102999a34129a3402a702aa
+x send 0x0011                                   CCCD enable. Enable notifications / response channel
+  send 570f6805040000000000000000000000         ??? unknown setup
+  recv 01
+x send 0x0011                                   CCCD enable, again. Redundant probably
+x send 5700050308 00000000 6a9e1faf 00          set clock = 2026-09-06 21:21:35
+x recv 01
+  send 570f690801                               query capability
+  recv 01 510100040302                          ??? unknown, maybe related to the 4 bytes per read
+x send 570f69080201                             query history metadata
+x recv 01 6a9e1a4b 6a9e1f73 0000000c 0078       history metadata response
+x send 570f690803 01 00000000 04                read 4 records @ offset 0
+x recv 01 99307799300285028c993088993002770272
+x send 570f690803 01 00000004 04                read 4 records @ offset 4
+x recv 01 9931999931027a02799a32009a33028c0287
+x send 570f690803 01 00000008 04                read 4 records @ offset 8
+x recv 01 9a34119a34029102999a34129a3402a702aa
 ```
 
-Metadata response:
+### Set clock message:
+```
+5700050308 00000000 6a9e1faf 00
+                    ^^^^^^^^-----> big endian unit timestamp. 1788747695 = Sun Sep  6 09:21:35 PM CDT 2026
+```
+
+### Metadata response:
 ```
 01 6a9e1a4b 6a9e1f73 0000000c 0078
 ---
@@ -66,7 +71,13 @@ Metadata response:
 0078     | sample interval in seconds             | 120 seconds
 ```
 
-Read 4 records response:
+### Read request message:
+```
+570f690803 01 00000008 04 --> offset 0x8 read 4 records. Response will be 18 bytes
+570f690803 01 0000017c 02 --> offset 0x17c read 2 records. Response will be 9 bytes
+```
+
+### Read 4 records response:
 - 18 bytes holds 4 records
 - 9 bytes for two records each
 ```
@@ -84,13 +95,11 @@ Byte
 7-8 | Record B CO2 PPM big-endian
 ```
 
-Notes:
+### Notes:
 - All commands have SwitchBot 0x57 magic value
 - responses begin with `0x01` byte
 - history commands start with `57 0f 69 08`
 
-TODO:
-- rerun with new sync.csv
-- figure out unknown parts (everything without an 'x' above)
-- why does the app show one data entry in between each data that Claude shows
-- make python
+### TODO:
+- reverse engineer app for more info
+- make python decoder
