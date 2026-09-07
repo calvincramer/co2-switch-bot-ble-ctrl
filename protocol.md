@@ -1,10 +1,10 @@
-# SwitchBot Meter Pro CO2 BLE protocol
-The current sensor information is sent in bluetooth advertisements. No pairing is needed.
+# SwitchBot Meter Pro CO2 BLE Protocol
+The **current** sensor information is sent in bluetooth advertisements. No pairing is needed to read this information.
 
 - model `W4900010`
 - device type byte `0x35`
 
-## Advertisement layout
+## Current Sensor Advertisement Layout
 A meter advertisement has two payloads, the service data and the manufacturer data.
 
 ### Service data - UUID `0000fd3d-0000-1000-8000-00805f9b34fb`
@@ -26,7 +26,7 @@ SwitchBot's assigned 16-bit UUID is `0xFD3D` and has three bytes:
 - bytes 13-14 - CO2 in ppm, big-endian unsigned
 - byte 15 - padding
 
-## Sources
+### Sources
 
 - [koyashiro - SwitchBot Meter Pro CO2 BLE analysis](https://github.com/koyashiro/zenn-contents/blob/main/articles/switch-bot-meter-pro-co2-ble.md)
 - [pySwitchbot](https://github.com/sblibs/pySwitchbot) - `adv_parsers/meter.py`, `adv_parsers/_sensor_th.py`, `devices/meter_pro.py`
