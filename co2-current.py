@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""
+This script continuously listens for the current sensor information from a SwitchBot Meter Pro CO2.
+
+See reverse-engineer/protocol-advertisements.md for more info.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -31,13 +37,13 @@ CO2_MAX_PPM = 9999
 
 CSV_COLUMNS = [
     "ts",
-    "addr",
-    "model",
+    # "addr",
+    # "model",
     "temp_c",
     "humidity_percent",
     "co2_ppm",
-    "battery_percent",
-    "rssi_dbm",
+    # "battery_percent",
+    # "rssi_dbm",
 ]
 
 
@@ -66,13 +72,13 @@ class Reading:
     def as_row(self) -> dict[str, str | float | int | None]:
         return {
             "ts": self.timestamp.isoformat(timespec="seconds"),
-            "addr": self.address,
-            "model": self.model,
+            # "addr": self.address,
+            # "model": self.model,
             "temp_c": self.temp_celsius,
             "humidity_percent": self.humidity_percent,
             "co2_ppm": self.co2_ppm,
-            "battery_percent": self.battery_percent,
-            "rssi_dbm": self.rssi_dbm,
+            # "battery_percent": self.battery_percent,
+            # "rssi_dbm": self.rssi_dbm,
         }
 
     def format_line(self) -> str:

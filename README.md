@@ -18,10 +18,13 @@ python3 -m pip install -r requirements.txt
 
 ## Usage
 ```sh
-./co2.py -h  # Help
-./co2.py     # watch for all advertisements, also see MAC addr here for later
+# help
+./co2-current.py -h
+./co2-history.py -h
+./co2-current.py     # watch for all advertisements, also see MAC addr here for later
 
-./co2.py --csv co2.csv  # append readings to a CSV log
+./co2-history.py --csv co2.csv  # write CSV log
+./co2-current.py --csv co2.csv  # append readings to log
 ```
 
 ## Recording Useful Data
