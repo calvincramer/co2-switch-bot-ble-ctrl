@@ -25,6 +25,8 @@ python3 -m pip install -r requirements.txt
 
 ./co2-history.py --csv co2.csv  # write CSV log
 ./co2-current.py --csv co2.csv  # append readings to log
+
+./co2-history.py --start 2026-01-01 --end 2026-01-02  # download data in a time range
 ```
 
 ## Recording Useful Data

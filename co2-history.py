@@ -54,14 +54,34 @@ class SectionInfo:
     count: int
     interval: int
 
-    def timestamp_of(self, index: int) -> datetime:
-        """Wall-clock time of record `index`, counting back from the newest.
+    def epoch_of(self, index: int) -> int:
+        """Unix time of record `index`, counting back from the newest.
 
         Anchored on end_time rather than start_time: the app does the same,
         and the two disagree by one interval in captured syncs.
         """
-        epoch = self.end_time - (self.count - 1 - index) * self.interval
-        return datetime.fromtimestamp(epoch, timezone.utc).astimezone()
+        return self.end_time - (self.count - 1 - index) * self.interval
+
+    def timestamp_of(self, index: int) -> datetime:
+        """Wall-clock time of record `index`."""
+        return datetime.fromtimestamp(self.epoch_of(index), timezone.utc).astimezone()
+
+    def index_range(self, start: datetime | None, end: datetime | None) -> tuple[int, int]:
+        """Half-open [first, stop) index range of the records inside [start, end].
+
+        Records are evenly spaced, so the range is computed rather than searched
+        for: nothing outside it ever has to be read off the device.
+        """
+        first, stop = 0, self.count
+        if start is not None:
+            # floor division: a record exactly on `start` is kept.
+            first = self.count - 1 - (self.end_time - int(start.timestamp())) // self.interval
+        if end is not None:
+            behind = self.end_time - int(end.timestamp())
+            stop = self.count - -(-behind // self.interval)  # ceil division
+        first = min(max(first, 0), self.count)
+        stop = min(max(stop, first), self.count)
+        return first, stop
 
 
 @dataclass(frozen=True)
@@ -240,20 +260,27 @@ def show_progress(done: int, total: int, page: int, pages: int, started: float) 
     )
 
 
-async def download_section(session: MeterSession, info: SectionInfo, page_size: int) -> list[HistoryRecord]:
+async def download_section(
+    session: MeterSession, info: SectionInfo, page_size: int, first: int, stop: int
+) -> list[HistoryRecord]:
 
-    def _plan_pages(total: int, page_size: int) -> list[tuple[int, int]]:
-        """Returns list of (offset, count) pairs covering every record with possibly a short page last."""
+    def _plan_pages(first: int, stop: int, page_size: int) -> list[tuple[int, int]]:
+        """Returns list of (offset, count) pairs covering [first, stop) with possibly a short page last."""
         pages = []
-        offset = 0
-        while offset < total:
-            pages.append((offset, min(page_size, total - offset)))
+        offset = first
+        while offset < stop:
+            pages.append((offset, min(page_size, stop - offset)))
             offset += page_size
         return pages
 
-    pages = _plan_pages(info.count, page_size)
+    # Records are stored in pairs and a read reply always starts on a pair boundary,
+    # so back the first offset up to an even index and drop the extra record later.
+    fetch_first = first - first % RECORDS_PER_GROUP
+    pages = _plan_pages(fetch_first, stop, page_size)
+    wanted = stop - first
     print(
-        f"  {info.count} records, one every {info.interval}s, {info.timestamp_of(0):%Y-%m-%d %H:%M} to {info.timestamp_of(info.count - 1):%Y-%m-%d %H:%M}",
+        f"  {wanted} of {info.count} records, one every {info.interval}s, "
+        f"{info.timestamp_of(first):%Y-%m-%d %H:%M} to {info.timestamp_of(stop - 1):%Y-%m-%d %H:%M}",
         file=sys.stderr,
     )
     print(f"  fetching {len(pages)} pages...", file=sys.stderr)
@@ -263,6 +290,8 @@ async def download_section(session: MeterSession, info: SectionInfo, page_size: 
     for page_number, (offset, count) in enumerate(pages, start=1):
         reply = await session.request(Requests.read_records(info.section, offset, count))
         for i, (temp, humidity, co2) in enumerate(Response.parse_record_resp(reply, count)):
+            if offset + i < first:
+                continue  # padding from the pair-boundary alignment
             records.append(
                 HistoryRecord(
                     timestamp=info.timestamp_of(offset + i),
@@ -271,9 +300,17 @@ async def download_section(session: MeterSession, info: SectionInfo, page_size: 
                     co2_ppm=co2,
                 )
             )
-        show_progress(len(records), info.count, page_number, len(pages), started)
+        show_progress(len(records), wanted, page_number, len(pages), started)
     print(f"\n  done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return records
+
+
+def parse_time(text: str) -> datetime:
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an ISO time like 2026-09-06T20:00") from None
+    return when if when.tzinfo is not None else when.astimezone()
 
 
 def parse_args() -> argparse.Namespace:
@@ -281,11 +318,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--address", metavar="MAC", help="device address (default: scan for one)")
     parser.add_argument("--csv", type=Path, metavar="PATH", help="also write records to this CSV file")
     parser.add_argument(
+        "--start",
+        type=parse_time,
+        metavar="TIME",
+        help="start downloading records at or after this ISO time. For example 2026-09-06T20:00. Defaults to oldest record",
+    )
+    parser.add_argument(
+        "--end",
+        type=parse_time,
+        metavar="TIME",
+        help="stop downloading records at or before this ISO time. Defaults to newest record",
+    )
+    parser.add_argument(
         "--set-clock",
         action="store_true",
         help="set device time to time of this machine",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.start is not None and args.end is not None and args.start > args.end:
+        parser.error("--start is after --end")
+    return args
 
 
 async def find_device(address: str | None, timeout: float) -> BLEDevice | None:
@@ -330,8 +382,14 @@ async def main() -> int:
             if info.count == 0:
                 print(f"  section {section} is empty", file=sys.stderr)
                 continue
+            first, stop = info.index_range(args.start, args.end)
+            if first == stop:
+                print(f"  section {section} has no records in the requested range", file=sys.stderr)
+                continue
             # Download data
-            all_records += await download_section(session, info, page_size=RECORDS_PER_READ)
+            all_records += await download_section(
+                session=session, info=info, page_size=RECORDS_PER_READ, first=first, stop=stop
+            )
 
     # Output data
     for record in all_records:
