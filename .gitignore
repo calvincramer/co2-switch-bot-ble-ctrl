@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 *.csv
+*.lock
+*.tmp

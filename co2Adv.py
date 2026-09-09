@@ -10,18 +10,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.uuids import normalize_uuid_16
+
+import co2_csv
 
 # Service data UUID: 0000fd3d-0000-1000-8000-00805f9b34fb
 UUID_SWITCHBOT_SERVICE_DATA = normalize_uuid_16(0xFD3D)
@@ -34,17 +34,6 @@ DEVICE_TYPE_METER_PRO_CO2 = 0x35
 
 # High range of the sensor spec. Anything larger is a bad packet.
 CO2_MAX_PPM = 9999
-
-CSV_COLUMNS = [
-    "ts",
-    # "addr",
-    # "model",
-    "temp_c",
-    "humidity_percent",
-    "co2_ppm",
-    # "battery_percent",
-    # "rssi_dbm",
-]
 
 
 @dataclass(frozen=True)
@@ -169,15 +158,13 @@ class Monitor:
         min_interval: float,
         emit_all: bool,
         as_json: bool,
-        csv_writer: csv.DictWriter | None,
-        csv_file: TextIO | None,
+        csv_log: co2_csv.CsvLog | None,
     ) -> None:
         self.addresses = addresses
         self.min_interval = min_interval
         self.emit_all = emit_all
         self.as_json = as_json
-        self.csv_writer = csv_writer
-        self.csv_file = csv_file
+        self.csv_log = csv_log
         self._last_emitted: dict[str, Reading] = {}
 
     def __matches_filter(self, device: BLEDevice) -> bool:
@@ -202,9 +189,8 @@ class Monitor:
             print(reading.format_line(), flush=True)
 
         # File
-        if self.csv_writer is not None and self.csv_file is not None:
-            self.csv_writer.writerow(reading.as_row())
-            self.csv_file.flush()
+        if self.csv_log is not None:
+            self.csv_log.add(reading.as_row())
         return None
 
     def callback(self, device: BLEDevice, adv: AdvertisementData) -> None:
@@ -219,17 +205,6 @@ class Monitor:
         return None
 
 
-def open_csv(path: Path) -> tuple[TextIO, csv.DictWriter]:
-    """Create or open CSV log file in append mode"""
-    needs_header = not path.exists() or path.stat().st_size == 0
-    handle = path.open("a", newline="")
-    writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
-    if needs_header:
-        writer.writeheader()
-        handle.flush()
-    return handle, writer
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read a SwitchBot Meter Pro CO2 over Bluetooth advertisements.")
     parser.add_argument(
@@ -242,7 +217,7 @@ def parse_args() -> argparse.Namespace:
         "--csv",
         type=Path,
         metavar="PATH",
-        help="append readings to this CSV file",
+        help="add readings to this CSV file. Works with an existing CSV file",
     )
     parser.add_argument(
         "--min-interval",
@@ -270,19 +245,14 @@ def parse_args() -> argparse.Namespace:
 async def main() -> int:
     args = parse_args()
     addresses = {a.upper() for a in args.address} if args.address else None
-
-    csv_file: TextIO | None = None
-    csv_writer: csv.DictWriter | None = None
-    if args.csv is not None:
-        csv_file, csv_writer = open_csv(args.csv)
+    csv_log = co2_csv.CsvLog(args.csv) if args.csv is not None else None
 
     monitor = Monitor(
         addresses=addresses,
         min_interval=args.min_interval,
         emit_all=args.emit_all,
         as_json=args.json,
-        csv_writer=csv_writer,
-        csv_file=csv_file,
+        csv_log=csv_log,
     )
 
     if not args.json:
@@ -298,9 +268,6 @@ async def main() -> int:
                 await asyncio.Event().wait()
     except asyncio.CancelledError:
         pass
-    finally:
-        if csv_file is not None:
-            csv_file.close()
     return 0
 
 

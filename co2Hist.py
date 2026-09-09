@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import math
 import sys
 import time
@@ -21,6 +20,8 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.uuids import normalize_uuid_16
+
+import co2_csv
 
 UUID_SWITCHBOT_SERVICE_DATA = normalize_uuid_16(0xFD3D)
 DEVICE_TYPE_METER_PRO_CO2 = 0x35
@@ -37,8 +38,6 @@ RECORDS_PER_READ = 4
 RECORDS_PER_GROUP = 2
 GROUP_SIZE_BYTES = 9
 
-CSV_COLUMNS = ["ts", "temp_c", "humidity_percent", "co2_ppm"]
-
 
 class ProtocolError(RuntimeError):
     pass
@@ -54,13 +53,23 @@ class SectionInfo:
     count: int
     interval: int
 
+    @property
+    def anchor(self) -> int:
+        """
+        Time of the newest record, adjusted to interval grid to stop multiple data points showing up
+        as the same but with slightly different seconds.
+        """
+        if self.interval <= 0:
+            return self.end_time
+        return (self.end_time + self.interval // 2) // self.interval * self.interval
+
     def epoch_of(self, index: int) -> int:
         """Unix time of record `index`, counting back from the newest.
 
-        Anchored on end_time rather than start_time: the app does the same,
-        and the two disagree by one interval in captured syncs.
+        Anchored on the newest record rather than start_time: the app does the
+        same, and the two disagree by one interval in captured syncs.
         """
-        return self.end_time - (self.count - 1 - index) * self.interval
+        return self.anchor - (self.count - 1 - index) * self.interval
 
     def timestamp_of(self, index: int) -> datetime:
         """Wall-clock time of record `index`."""
@@ -75,9 +84,9 @@ class SectionInfo:
         first, stop = 0, self.count
         if start is not None:
             # floor division: a record exactly on `start` is kept.
-            first = self.count - 1 - (self.end_time - int(start.timestamp())) // self.interval
+            first = self.count - 1 - (self.anchor - int(start.timestamp())) // self.interval
         if end is not None:
-            behind = self.end_time - int(end.timestamp())
+            behind = self.anchor - int(end.timestamp())
             stop = self.count - -(-behind // self.interval)  # ceil division
         first = min(max(first, 0), self.count)
         stop = min(max(stop, first), self.count)
@@ -265,33 +274,35 @@ async def download_section(
 ) -> list[HistoryRecord]:
 
     def _plan_pages(first: int, stop: int, page_size: int) -> list[tuple[int, int]]:
-        """Returns list of (offset, count) pairs covering [first, stop) with possibly a short page last."""
+        """
+        Returns list of (offset, count) pairs covering [first, stop).
+        The device rejects reads for single records, so we always read in pairs.
+        """
         pages = []
-        offset = first
+        offset = first - first % RECORDS_PER_GROUP
         while offset < stop:
-            pages.append((offset, min(page_size, stop - offset)))
-            offset += page_size
+            count = min(page_size, stop - offset)
+            count += count % RECORDS_PER_GROUP  # round up to a whole pair
+            pages.append((offset, min(count, info.count - offset)))
+            offset += count
         return pages
 
-    # Records are stored in pairs and a read reply always starts on a pair boundary,
-    # so back the first offset up to an even index and drop the extra record later.
-    fetch_first = first - first % RECORDS_PER_GROUP
-    pages = _plan_pages(fetch_first, stop, page_size)
+    pages = _plan_pages(first, stop, page_size)
     wanted = stop - first
     print(
-        f"  {wanted} of {info.count} records, one every {info.interval}s, "
+        f"{wanted} of {info.count} records, one every {info.interval}s, "
         f"{info.timestamp_of(first):%Y-%m-%d %H:%M} to {info.timestamp_of(stop - 1):%Y-%m-%d %H:%M}",
         file=sys.stderr,
     )
-    print(f"  fetching {len(pages)} pages...", file=sys.stderr)
+    print(f"fetching {len(pages)} pages...", file=sys.stderr)
 
     records: list[HistoryRecord] = []
     started = time.monotonic()
     for page_number, (offset, count) in enumerate(pages, start=1):
         reply = await session.request(Requests.read_records(info.section, offset, count))
         for i, (temp, humidity, co2) in enumerate(Response.parse_record_resp(reply, count)):
-            if offset + i < first:
-                continue  # padding from the pair-boundary alignment
+            if not first <= offset + i < stop:
+                continue  # padding from the pair alignment, outside the range asked for
             records.append(
                 HistoryRecord(
                     timestamp=info.timestamp_of(offset + i),
@@ -316,7 +327,7 @@ def parse_time(text: str) -> datetime:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download stored history from a SwitchBot Meter Pro CO2.")
     parser.add_argument("--address", metavar="MAC", help="device address (default: scan for one)")
-    parser.add_argument("--csv", type=Path, metavar="PATH", help="also write records to this CSV file")
+    parser.add_argument("--csv", type=Path, metavar="PATH", help="create or merge records into this CSV file")
     parser.add_argument(
         "--start",
         type=parse_time,
@@ -370,21 +381,21 @@ async def main() -> int:
         # Possibly set time on device
         if args.set_clock:
             await session.request(Requests.set_clock())
-            print("  clock set", file=sys.stderr)
+            print("clock set", file=sys.stderr)
 
         # Get store info
         sections = Response.parse_store_info(await session.request(Requests.get_store_info()))
-        print(f"  {len(sections)} section(s): {sections}", file=sys.stderr)
+        print(f"{len(sections)} section(s): {sections}", file=sys.stderr)
 
         for section in sections:
             # Get info about this store
             info = Response.parse_section_info(section, await session.request(Requests.get_section_info(section)))
             if info.count == 0:
-                print(f"  section {section} is empty", file=sys.stderr)
+                print(f"section {section} is empty", file=sys.stderr)
                 continue
             first, stop = info.index_range(args.start, args.end)
             if first == stop:
-                print(f"  section {section} has no records in the requested range", file=sys.stderr)
+                print(f"section {section} has no records in the requested range", file=sys.stderr)
                 continue
             # Download data
             all_records += await download_section(
@@ -392,15 +403,18 @@ async def main() -> int:
             )
 
     # Output data
+    # to screen
     for record in all_records:
         print(record.format_line())
 
+    # to file
     if args.csv is not None:
-        with args.csv.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-            writer.writerows(record.as_row() for record in all_records)
-        print(f"Wrote {len(all_records)} records to {args.csv}", file=sys.stderr)
+        added, replaced = co2_csv.merge(args.csv, (record.as_row() for record in all_records))
+        print(
+            f"{args.csv}: {added} new record(s), {replaced} updated, "
+            f"{len(all_records) - added - replaced} already present",
+            file=sys.stderr,
+        )
 
     return 0
 

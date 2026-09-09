@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from co2 import COMPANY_ID_SWITCHBOT, UUID_SWITCHBOT_SERVICE_DATA, parse_reading
+from co2Adv import COMPANY_ID_SWITCHBOT, UUID_SWITCHBOT_SERVICE_DATA, parse_reading
 
 DEVICE = BLEDevice("E1:22:33:44:55:66", "MeterPro CO2", None)
 
