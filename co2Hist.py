@@ -261,7 +261,7 @@ def show_progress(done: int, total: int, page: int, pages: int, started: float) 
     bar_width = 30
     filled = int(bar_width * done / total) if total else bar_width
     print(
-        f"\r  [{'#' * filled}{'.' * (bar_width - filled)}] "
+        f"\r[{'#' * filled}{'.' * (bar_width - filled)}] "
         f"page {page:>4}/{pages}  {done:>5}/{total} records  ETA {eta:4.0f}s",
         end="",
         file=sys.stderr,
@@ -312,7 +312,7 @@ async def download_section(
                 )
             )
         show_progress(len(records), wanted, page_number, len(pages), started)
-    print(f"\n  done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    print(f"\ndone in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return records
 
 
