@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from co2Hist import plan_pages
 from co2Adv import COMPANY_ID_SWITCHBOT, UUID_SWITCHBOT_SERVICE_DATA, parse_reading
 
 DEVICE = BLEDevice("E1:22:33:44:55:66", "MeterPro CO2", None)
@@ -83,6 +84,23 @@ class ParserTest(unittest.TestCase):
 
     def test_zero_packet(self):
         self.assertIsNone(decode("350000", "00005E00530069E400800031000000"))
+
+
+class PlanPagesTest(unittest.TestCase):
+    def test_reads_are_even_and_inside_section(self):
+        for total in range(2, 12):
+            for first in range(total):
+                for stop in range(first + 1, total + 1):
+                    pages = plan_pages(total, first, stop, 4)
+                    covered = set()
+                    for offset, count in pages:
+                        self.assertEqual(count % 2, 0, (total, first, stop, pages))
+                        self.assertTrue(0 <= offset and offset + count <= total, (total, first, stop, pages))
+                        covered.update(range(offset, offset + count))
+                    self.assertTrue(set(range(first, stop)) <= covered, (total, first, stop, pages))
+
+    def test_odd_section_does_not_read_single_record(self):
+        self.assertEqual(plan_pages(5, 0, 5, 4), [(0, 4), (3, 2)])
 
 
 if __name__ == "__main__":

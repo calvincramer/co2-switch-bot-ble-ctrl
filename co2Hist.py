@@ -269,25 +269,30 @@ def show_progress(done: int, total: int, page: int, pages: int, started: float) 
     )
 
 
+def plan_pages(total: int, first: int, stop: int, page_size: int) -> list[tuple[int, int]]:
+    """
+    Returns list of (offset, count) pairs covering [first, stop) in a section of `total` records.
+    The device rejects reads for single records, so every read has an even count. A read that would
+    run past the end of the section is moved back instead, so it overlaps the previous page.
+    """
+    pages = []
+    offset = first - first % RECORDS_PER_GROUP
+    while offset < stop:
+        count = min(page_size, stop - offset)
+        count += count % RECORDS_PER_GROUP  # round up to a whole pair
+        count = min(count, max(total - total % RECORDS_PER_GROUP, RECORDS_PER_GROUP))
+        if offset + count > total:
+            offset = max(total - count, 0)
+        pages.append((offset, count))
+        offset += count
+    return pages
+
+
 async def download_section(
     session: MeterSession, info: SectionInfo, page_size: int, first: int, stop: int
 ) -> list[HistoryRecord]:
 
-    def _plan_pages(first: int, stop: int, page_size: int) -> list[tuple[int, int]]:
-        """
-        Returns list of (offset, count) pairs covering [first, stop).
-        The device rejects reads for single records, so we always read in pairs.
-        """
-        pages = []
-        offset = first - first % RECORDS_PER_GROUP
-        while offset < stop:
-            count = min(page_size, stop - offset)
-            count += count % RECORDS_PER_GROUP  # round up to a whole pair
-            pages.append((offset, min(count, info.count - offset)))
-            offset += count
-        return pages
-
-    pages = _plan_pages(first, stop, page_size)
+    pages = plan_pages(info.count, first, stop, page_size)
     wanted = stop - first
     print(
         f"{wanted} of {info.count} records, one every {info.interval}s, "
@@ -298,11 +303,13 @@ async def download_section(
 
     records: list[HistoryRecord] = []
     started = time.monotonic()
+    next_index = first
     for page_number, (offset, count) in enumerate(pages, start=1):
         reply = await session.request(Requests.read_records(info.section, offset, count))
         for i, (temp, humidity, co2) in enumerate(Response.parse_record_resp(reply, count)):
-            if not first <= offset + i < stop:
-                continue  # padding from the pair alignment, outside the range asked for
+            if not next_index <= offset + i < stop:
+                continue  # padding from the pair alignment, or overlap with the previous page
+            next_index = offset + i + 1
             records.append(
                 HistoryRecord(
                     timestamp=info.timestamp_of(offset + i),
